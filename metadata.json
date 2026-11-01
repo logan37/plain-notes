@@ -1,0 +1,6 @@
+{
+  "name": "plain-notes",
+  "description": "An encrypted, privacy-first Google Keep alternative with markdown, folders, bullets, and private cloud sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -4,11 +4,13 @@ on:
   push:
     tags:
       - 'v*'
+  release:
+    types: [published, created]
   workflow_dispatch:
     inputs:
       version_tag:
         description: 'Version Tag (e.g. v1.0.0)'
-        required: true
+        required: false
         default: 'v1.0.0'
 
 permissions:
@@ -25,28 +27,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Setup Gradle Cache
-        uses: gradle/actions/setup-gradle@v3
-
-      - name: Run Unit & Robolectric Tests
-        run: gradle :app:testDebugUnitTest
-
-      - name: Build Release APK
-        run: gradle :app:assembleRelease --stacktrace
-
-      - name: Prepare Release Asset
-        id: prepare_asset
+      - name: Determine Version
+        id: get_version
         run: |
-          VERSION="${{ github.ref_name }}"
+          VERSION="${{ github.event.release.tag_name }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="${{ github.ref_name }}"
+          fi
           if [ -z "$VERSION" ] || [[ "$VERSION" != v* ]]; then
             VERSION="${{ github.event.inputs.version_tag }}"
           fi
@@ -54,42 +41,65 @@ jobs:
             VERSION="v1.0.0"
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Target Release Version: $VERSION"
 
-          # Find the built release apk
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Make Gradle Wrapper Executable
+        run: chmod +x gradlew
+
+      - name: Setup Keystores and Environment
+        run: |
+          # Ensure .env exists from example
+          if [ ! -f ".env" ]; then
+            cp .env.example .env
+          fi
+          # Generate signing keystores for release and debug builds
+          keytool -genkeypair -v -keystore my-upload-key.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=plain-notes,O=Android,C=US"
+          keytool -genkeypair -v -keystore debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
+          echo "KEYSTORE_PATH=$GITHUB_WORKSPACE/my-upload-key.jks" >> $GITHUB_ENV
+          echo "STORE_PASSWORD=android" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=android" >> $GITHUB_ENV
+
+      - name: Run Unit Tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
+
+      - name: Build APKs
+        run: |
+          ./gradlew :app:assembleRelease :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Prepare Release Asset
+        id: prepare_asset
+        run: |
           APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
-            # Fallback to assembleDebug if unsigned release requires keystore
-            gradle :app:assembleDebug
             APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
           fi
-
-          TARGET_APK="plain-notes-${VERSION}.apk"
+          TARGET_APK="plain-notes-${{ env.VERSION }}.apk"
           cp "$APK_PATH" "$TARGET_APK"
           echo "ASSET_NAME=$TARGET_APK" >> $GITHUB_ENV
+          echo "Prepared APK: $TARGET_APK from $APK_PATH"
+          ls -lh "$TARGET_APK"
 
-      - name: Generate Changelog
-        id: changelog
-        run: |
-          cat << 'EOF' > release_body.md
-          # plain-notes Release ${{ env.VERSION }} 🔒📝
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plain-notes-apk
+          path: ${{ env.ASSET_NAME }}
 
-          ### ✨ Highlights
-          - **Google Keep Alternative**: Clean masonry cards, pastel color palette, and instant search.
-          - **Offline-First Storage**: High-performance local SQLite database via Jetpack Room.
-          - **Markdown & Interactive Bullets**: Headers, bold, quotes, and tap-to-toggle checklist items.
-          - **Zero-Knowledge Encryption**: AES-256-GCM client-side encryption with PBKDF2 key derivation.
-          - **Private Cloud & Local Git Sync**: Direct sync with Google Drive, Dropbox, OneDrive, WebDAV, or local Git repositories.
-
-          ### 📦 Installation
-          Download and install `plain-notes-${{ env.VERSION }}.apk` attached below.
-          EOF
-
-      - name: Create GitHub Release
+      - name: Attach APK to GitHub Release
         uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         with:
           tag_name: ${{ env.VERSION }}
           name: plain-notes ${{ env.VERSION }}
-          body_path: release_body.md
           files: ${{ env.ASSET_NAME }}
           draft: false
           prerelease: false
